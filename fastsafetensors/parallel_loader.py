@@ -121,6 +121,8 @@ class PipelineParallel:
         max_concurrent_producers: int = 1,
         queue_size: int = 0,  # Changed default to 0 for unbuffered behavior
         use_tqdm_on_load: bool = True,
+        use_cuda_streams: bool = True,  # Enable CUDA streams by default
+        lazy_broadcast: bool = True,  # True: per-file on-demand broadcast; False: broadcast all files upfront
         **kwargs,
     ):
 
@@ -129,6 +131,8 @@ class PipelineParallel:
         self.max_concurrent_producers = max_concurrent_producers
         self.queue_size = queue_size
         self.use_tqdm_on_load = use_tqdm_on_load
+        self.use_cuda_streams = use_cuda_streams
+        self.lazy_broadcast = lazy_broadcast
 
         # Batch files
         self.weight_files_batches = self._create_batches(pg)
@@ -153,6 +157,20 @@ class PipelineParallel:
         # Logging setup - get from environment variable, default to False
         self.print_log = os.getenv("FASTSAFETENSORS_DEBUG", "false").lower() == "true"
         self.log_prefix = f"PG{pg.rank() if pg is not None else 0}"
+        
+        # Create dedicated CUDA stream for producer (after print_log is set)
+        # Note: consumer runs on the main thread, yielded tensors naturally async with
+        # the caller's CUDA operations on the default stream, so no consumer_stream needed.
+        self.producer_stream = None
+        if self.use_cuda_streams:
+            try:
+                if torch.cuda.is_available():
+                    self.producer_stream = torch.cuda.Stream()
+                    if self.print_log:
+                        print(f"[{self.log_prefix}] CUDA Streams enabled: producer_stream={self.producer_stream}")
+            except Exception as e:
+                if self.print_log:
+                    print(f"[{self.log_prefix}] Warning: Failed to create CUDA streams: {e}")
         fstcpp.set_gil_release(True)
 
     def _create_batches(self, pg) -> List[List[str]]:
@@ -226,10 +244,17 @@ class PipelineParallel:
                 # Clear the event after wait to ensure next wait will block
                 self.consumer_processed.clear()
 
+            # Copy files to device with dedicated CUDA stream
             with TimingContext(
                 "copy_files_to_device", self._log_message, batch_id
             ) as timer:
-                fb = self.loader.copy_files_to_device()
+                if self.producer_stream is not None:
+                    with torch.cuda.stream(self.producer_stream):
+                        fb = self.loader.copy_files_to_device()
+                        # Synchronize to ensure copy is complete before putting in queue
+                        torch.cuda.current_stream().synchronize()
+                else:
+                    fb = self.loader.copy_files_to_device()
             copy_time = timer.elapsed_ms
 
             # Get tensor keys
@@ -305,13 +330,31 @@ class PipelineParallel:
             self._log_message(
                 f"Batch {batch.batch_id}: tensor key len: {len(batch.keys)}"
             )
-            # Consumer operation: extract tensors
+            grouped_keys = batch.fb.get_keys_grouped_by_file()
+            broadcast_time = 0.0
+            fb_get_tensor_time = 0.0
+            yield_wait_time = 0.0
             with TimingContext(
                 "get_tensor", self._log_message, batch.batch_id
             ) as timer:
-                for key in batch.keys:
-                    tensor = batch.fb.get_tensor(key)
+                yield_start = time.time()
+                for key in grouped_keys:
+                    yield_wait_time += (time.time() - yield_start) * 1000
+                    if self.lazy_broadcast:
+                        rank, lidx = batch.fb.key_to_rank_lidx[key]
+                        with TimingContext(
+                            "lazy_broadcast", None, batch.batch_id, log_on_exit=False
+                        ) as bt:
+                            batch.fb.ensure_file_broadcasted(rank, lidx)
+                        broadcast_time += bt.elapsed_ms
+                    with TimingContext(
+                        "fb_get_tensor", None, batch.batch_id, log_on_exit=False
+                    ) as gt:
+                        tensor = batch.fb.get_tensor(key)
+                    fb_get_tensor_time += gt.elapsed_ms
+                    yield_start = time.time()
                     yield key, tensor
+                yield_wait_time += (time.time() - yield_start) * 1000
             get_tensor_time = timer.elapsed_ms
         finally:
             # Close the file buffer
@@ -323,8 +366,12 @@ class PipelineParallel:
             f"Batch {batch.batch_id} summary: "
             f"add_filenames={batch.add_filenames_time:.3f}ms, "
             f"copy_files={batch.copy_files_time:.3f}ms, "
-            f"get_tensor={get_tensor_time:.3f}ms, "
-            f"close={close_time:.3f}ms"
+            f"lazy_broadcast={broadcast_time:.3f}ms, "
+            f"fb_get_tensor={fb_get_tensor_time:.3f}ms, "
+            f"yield_wait={yield_wait_time:.3f}ms, "
+            f"get_tensor_total={get_tensor_time:.3f}ms, "
+            f"close={close_time:.3f}ms, "
+            f"num_keys={len(grouped_keys)}"
         )
         # sync
         if self.queue_size < 0 and self.consumer_processed is not None:
@@ -432,6 +479,8 @@ class ParallelLoader(PipelineParallel):
         set_numa: bool = True,
         debug_log: bool = False,
         framework="pytorch",
+        use_cuda_streams: bool = True,  # Enable CUDA streams by default
+        lazy_broadcast: bool = True,  # True: per-file on-demand broadcast; False: broadcast all upfront
         **kwargs,
     ):
         """Initialize PipelineParallelLoader with a pre-configured SafeTensorsFileLoader.
@@ -448,7 +497,9 @@ class ParallelLoader(PipelineParallel):
             nogds (bool): If True, turn off GDS and fallback to pread with bounce buffer.
             set_numa (bool): If True, set NUMA node for optimal memory allocation.
             debug_log (bool): Enable debug logs.
-            framework (str): Framework to use for tensor operations
+            framework (str): Framework to use for tensor operations.
+            lazy_broadcast (bool): If True, broadcast file buffers on demand per-file.
+                                   If False, broadcast all file buffers upfront.
         """
         loader = SafeTensorsFileLoader(
             pg,
@@ -469,5 +520,7 @@ class ParallelLoader(PipelineParallel):
             max_concurrent_producers,
             queue_size,
             use_tqdm_on_load,
+            use_cuda_streams=use_cuda_streams,
+            lazy_broadcast=lazy_broadcast,
             **kwargs,
         )
