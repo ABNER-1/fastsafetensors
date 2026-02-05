@@ -173,7 +173,19 @@ def MyExtension(
 
 
 class CustomBuildExt(build_ext):
-    """Custom build_ext to handle automatic hipification for ROCm platforms"""
+    """Custom build_ext to handle automatic hipification for ROCm platforms."""
+
+    def build_extension(self, ext):
+        """Override to handle optional extensions gracefully"""
+        try:
+            build_ext.build_extension(self, ext)
+        except Exception as e:
+            if getattr(ext, "optional", False):
+                print(f"Warning: Failed to build optional extension {ext.name}")
+                print(f"  Error: {e}")
+                print(f"  Skipping {ext.name} (this is optional)")
+            else:
+                raise
 
     def run(self):
         # Detect platform
@@ -244,7 +256,9 @@ setup(
         "fastsafetensors.frameworks",
     ],
     include_package_data=True,
-    package_data={"fastsafetensors.cpp": package_data_patterns},
+    package_data={
+        "fastsafetensors.cpp": package_data_patterns,
+    },
     ext_modules=[
         MyExtension(
             name=f"fastsafetensors.cpp",
@@ -253,7 +267,7 @@ setup(
             mod_name="cpp",
             platform_type=platform_type,
             rocm_path=rocm_path_detected,
-        )
+        ),
     ],
     cmdclass={
         "build_ext": CustomBuildExt,
