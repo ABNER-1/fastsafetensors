@@ -163,6 +163,7 @@ def new_threefs_file_copier(
     entries: int = 64,
     io_depth: int = 0,
     buffer_size: int = 64 * 1024 * 1024,
+    **kwargs,
 ) -> CopierConstructFunc:
     """
     创建 3FS 文件 copier 工厂函数
