@@ -157,7 +157,7 @@ class PipelineParallel:
         # Logging setup - get from environment variable, default to False
         self.print_log = os.getenv("FASTSAFETENSORS_DEBUG", "false").lower() == "true"
         self.log_prefix = f"PG{pg.rank() if pg is not None else 0}"
-        
+
         # Create dedicated CUDA stream for producer (after print_log is set)
         # Note: consumer runs on the main thread, yielded tensors naturally async with
         # the caller's CUDA operations on the default stream, so no consumer_stream needed.
@@ -167,10 +167,14 @@ class PipelineParallel:
                 if torch.cuda.is_available():
                     self.producer_stream = torch.cuda.Stream()
                     if self.print_log:
-                        print(f"[{self.log_prefix}] CUDA Streams enabled: producer_stream={self.producer_stream}")
+                        print(
+                            f"[{self.log_prefix}] CUDA Streams enabled: producer_stream={self.producer_stream}"
+                        )
             except Exception as e:
                 if self.print_log:
-                    print(f"[{self.log_prefix}] Warning: Failed to create CUDA streams: {e}")
+                    print(
+                        f"[{self.log_prefix}] Warning: Failed to create CUDA streams: {e}"
+                    )
         fstcpp.set_gil_release(True)
 
     def _create_batches(self, pg) -> List[List[str]]:
