@@ -139,10 +139,12 @@ class LazyTensorFactory:
             self._file_buffer_broadcasted = True
             return
 
-        is_owner = (self.rank == pg.rank())
+        is_owner = self.rank == pg.rank()
 
         import time as _time
+
         import torch as _torch
+
         alloc_recv_ms = 0.0
         dlpack_wrap_ms = 0.0
         nccl_broadcast_ms = 0.0
@@ -173,7 +175,13 @@ class LazyTensorFactory:
             t0 = _time.time()
             recv_gbuf = self.framework.alloc_tensor_memory(buffer_size, self.device)
             buf_tensor = self.framework.from_dlpack(
-                from_cuda_buffer(recv_gbuf.get_base_address(), [buffer_size], [1], DType.U8, self.device),
+                from_cuda_buffer(
+                    recv_gbuf.get_base_address(),
+                    [buffer_size],
+                    [1],
+                    DType.U8,
+                    self.device,
+                ),
                 self.device,
                 DType.U8,
             )
@@ -202,16 +210,26 @@ class LazyTensorFactory:
             logger.error(
                 "broadcast_file_buffer timing: owner rank=%d, buffer_size=%d, "
                 "dlpack_wrap=%.3fms, nccl_broadcast=%.3fms, cuda_sync=%.3fms, src=%s",
-                self.rank, buffer_size, dlpack_wrap_ms, nccl_broadcast_ms,
-                cuda_sync_ms, self.metadata.src,
+                self.rank,
+                buffer_size,
+                dlpack_wrap_ms,
+                nccl_broadcast_ms,
+                cuda_sync_ms,
+                self.metadata.src,
             )
         else:
             logger.error(
                 "broadcast_file_buffer timing: recv rank=%d, buffer_size=%d, "
                 "alloc_recv=%.3fms, nccl_broadcast=%.3fms, pre_split_sync=%.3fms, "
                 "split_tensors=%.3fms, cuda_sync=%.3fms, src=%s",
-                pg.rank(), buffer_size, alloc_recv_ms, nccl_broadcast_ms,
-                pre_split_sync_ms, split_tensors_ms, cuda_sync_ms, self.metadata.src,
+                pg.rank(),
+                buffer_size,
+                alloc_recv_ms,
+                nccl_broadcast_ms,
+                pre_split_sync_ms,
+                split_tensors_ms,
+                cuda_sync_ms,
+                self.metadata.src,
             )
 
         self._file_buffer_broadcasted = True

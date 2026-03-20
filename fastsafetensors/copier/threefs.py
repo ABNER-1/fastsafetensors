@@ -33,15 +33,21 @@ Usage:
 
 from typing import Dict
 
+# Import ThreeFSFileReader from the independent fastsafetensor_3fs_reader package
+from fastsafetensor_3fs_reader import (
+    ThreeFSFileReader,
+)
+from fastsafetensor_3fs_reader import is_available as _check_available
+
 from fastsafetensors import cpp as fstcpp
 from fastsafetensors.common import SafeTensorsMetadata, init_logger
+from fastsafetensors.copier.base import CopierInterface
+from fastsafetensors.copier.registry import (
+    CopierConstructFunc,
+    register_copier_constructor,
+)
 from fastsafetensors.frameworks import FrameworkOpBase, TensorBase
 from fastsafetensors.st_types import Device, DType
-from fastsafetensors.copier.base import CopierInterface
-from fastsafetensors.copier.registry import CopierConstructFunc, register_copier_constructor
-
-# Import ThreeFSFileReader from the independent fastsafetensor_3fs_reader package
-from fastsafetensor_3fs_reader import ThreeFSFileReader, is_available as _check_available
 
 try:
     _USRBIO_AVAILABLE = _check_available()
@@ -102,7 +108,9 @@ class ThreeFSFileCopier(CopierInterface):
         gbuf = self.framework.alloc_tensor_memory(length, self.device)
 
         # 使用 read_chunked 方法，fd 由 reader 内部管理
-        logger.info(f"Reading {length} bytes from {self.metadata.src} using chunked read")
+        logger.info(
+            f"Reading {length} bytes from {self.metadata.src} using chunked read"
+        )
 
         total_read = self.reader.read_chunked(
             path=self.metadata.src,
@@ -111,13 +119,13 @@ class ThreeFSFileCopier(CopierInterface):
             total_length=length,
             chunk_size=max_copy_block_size if max_copy_block_size > 0 else 0,
         )
-        
+
         if total_read != length:
             raise Exception(
                 f"ThreeFSFileCopier.submit_io: incomplete read, "
                 f"expected={length}, actual={total_read}"
             )
-        
+
         logger.info(f"Successfully read {total_read} bytes")
 
         return gbuf
@@ -146,6 +154,7 @@ class ThreeFSFileCopier(CopierInterface):
         return self.metadata.get_tensors(
             gbuf, self.device, self.metadata.header_length, dtype=dtype
         )
+
 
 @register_copier_constructor("3fs")
 def new_threefs_file_copier(

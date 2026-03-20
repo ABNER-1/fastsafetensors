@@ -101,7 +101,9 @@ class BaseSafeTensorsFileLoader:
                     if realpath in self._metadata_cache:
                         metadata = self._metadata_cache[realpath]
                     else:
-                        metadata = SafeTensorsMetadata.from_file(realpath, self.framework)
+                        metadata = SafeTensorsMetadata.from_file(
+                            realpath, self.framework
+                        )
                     self.meta[realpath] = (metadata, rank)
                     self.frames.update(metadata.tensors)
                     if rank == self.pg.rank():

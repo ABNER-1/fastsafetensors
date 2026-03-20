@@ -3,14 +3,16 @@
 import time
 from typing import Any, List, Optional
 
+from fastsafetensor_3fs_reader import ThreeFSFileReader, extract_mount_point
+
+from . import cpp as fstcpp
 from .common import SafeTensorsMetadata, init_logger
 from .frameworks import get_framework_op
-from .parallel_loader import PipelineParallel
 from .loader import BaseSafeTensorsFileLoader, loaded_library
-from fastsafetensor_3fs_reader import ThreeFSFileReader, extract_mount_point
-from . import cpp as fstcpp
+from .parallel_loader import PipelineParallel
 
 logger = init_logger(__name__)
+
 
 class ThreeFSLoader(BaseSafeTensorsFileLoader):
     """Load .safetensors files using 3FS USRBIO for high-performance I/O.
@@ -52,18 +54,19 @@ class ThreeFSLoader(BaseSafeTensorsFileLoader):
         if not loaded_library:
             fstcpp.load_library_functions()
             loaded_library = True
+        fstcpp.set_debug_log(debug_log)
         super().__init__(
             pg,
             self.device,
             copier_type="3fs",
             set_numa=True,
-            debug_log=debug_log,
             disable_cache=disable_cache,
             framework=framework,
             metadata_cache=metadata_cache,
             mount_point=mount_point,
             **kwargs,
         )
+
 
 class ParallelThreeFSLoader(PipelineParallel):
     """Parallel loader for .safetensors files using 3FS USRBIO.
@@ -139,7 +142,7 @@ class ParallelThreeFSLoader(PipelineParallel):
 
         # Step 2: Get reader reference
         t0 = time.time()
-        self._reader = getattr(loader.copier_constructor, 'reader', None)
+        self._reader = getattr(loader.copier_constructor, "reader", None)
         t_get_reader = (time.time() - t0) * 1000
 
         if pre_open_files and self._reader is not None:
@@ -152,7 +155,11 @@ class ParallelThreeFSLoader(PipelineParallel):
 
             # Step 4: Parse headers → SafeTensorsMetadata
             t0 = time.time()
-            for filepath, (header_string, header_length, file_size) in header_results.items():
+            for filepath, (
+                header_string,
+                header_length,
+                file_size,
+            ) in header_results.items():
                 try:
                     metadata_cache[filepath] = SafeTensorsMetadata.from_header_bytes(
                         header_string, header_length, file_size, filepath, framework_op
@@ -160,7 +167,8 @@ class ParallelThreeFSLoader(PipelineParallel):
                 except Exception as exc:
                     logger.warning(
                         "from_header_bytes failed for %s: %s, will load on demand",
-                        filepath, exc,
+                        filepath,
+                        exc,
                     )
             t_parse_headers = (time.time() - t0) * 1000
 
@@ -190,9 +198,13 @@ class ParallelThreeFSLoader(PipelineParallel):
             "read_headers=%.3fms, parse_headers=%.3fms, "
             "inject_cache=%.3fms, pipeline_init=%.3fms, "
             "files=%d",
-            t_total, t_create_loader, t_get_reader,
-            t_read_headers, t_parse_headers,
-            t_inject_cache, t_pipeline_init,
+            t_total,
+            t_create_loader,
+            t_get_reader,
+            t_read_headers,
+            t_parse_headers,
+            t_inject_cache,
+            t_pipeline_init,
             len(metadata_cache),
         )
 
