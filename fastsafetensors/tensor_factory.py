@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple
 from . import cpp as fstcpp
 from .common import SafeTensorsMetadata, init_logger, is_debug
 from .copier.base import CopierInterface, DummyDeviceBuffer
-from .dlpack import from_cuda_buffer
 from .frameworks import FrameworkOpBase, ProcessGroupBase, TensorBase
 from .st_types import Device, DType
 
@@ -39,8 +38,6 @@ class LazyTensorFactory:
         self.lidx = lidx
         self.next_tag = 1
         self.disable_cache = disable_cache
-        self._file_buffer_broadcasted = False
-        self._recv_gbuf: Optional[fstcpp.gds_device_buffer] = None
 
     def submit_io(self, use_buf_register: bool, max_copy_block_size: int):
         if self.copier is not None:
@@ -118,122 +115,6 @@ class LazyTensorFactory:
         pg.recv(t, src_rank, tag=tag)
         return t
 
-    def broadcast_file_buffer(self, pg: ProcessGroupBase) -> None:
-        """Broadcast the entire file buffer at once instead of per-tensor broadcast.
-
-        For the source rank (file owner), wraps the existing gbuf as a 1D U8 tensor
-        via dlpack and broadcasts it. For non-owner ranks, allocates a single large
-        buffer, receives the broadcast, then uses metadata.get_tensors() to split
-        individual tensors via dlpack zero-copy views.
-
-        This avoids N separate memory allocations and N separate broadcast calls,
-        replacing them with 1 allocation + 1 broadcast.
-        """
-        if pg.size() == 1:
-            return
-        if self._file_buffer_broadcasted:
-            return
-
-        buffer_size = self.metadata.size_bytes - self.metadata.header_length
-        if buffer_size <= 0:
-            self._file_buffer_broadcasted = True
-            return
-
-        is_owner = self.rank == pg.rank()
-
-        import time as _time
-
-        import torch as _torch
-
-        alloc_recv_ms = 0.0
-        dlpack_wrap_ms = 0.0
-        nccl_broadcast_ms = 0.0
-        pre_split_sync_ms = 0.0
-        split_tensors_ms = 0.0
-
-        if is_owner:
-            if self.gbuf is None:
-                raise Exception(
-                    f"broadcast_file_buffer: gbuf is None on owner rank={self.rank}, "
-                    f"src={self.metadata.src}"
-                )
-            t0 = _time.time()
-            dl_tensor = from_cuda_buffer(
-                self.gbuf.get_base_address(),
-                [buffer_size],
-                [1],
-                DType.U8,
-                self.device,
-            )
-            buf_tensor = self.framework.from_dlpack(dl_tensor, self.device, DType.U8)
-            dlpack_wrap_ms = (_time.time() - t0) * 1000
-
-            t0 = _time.time()
-            pg.broadcast(buf_tensor, self.rank)
-            nccl_broadcast_ms = (_time.time() - t0) * 1000
-        else:
-            t0 = _time.time()
-            recv_gbuf = self.framework.alloc_tensor_memory(buffer_size, self.device)
-            buf_tensor = self.framework.from_dlpack(
-                from_cuda_buffer(
-                    recv_gbuf.get_base_address(),
-                    [buffer_size],
-                    [1],
-                    DType.U8,
-                    self.device,
-                ),
-                self.device,
-                DType.U8,
-            )
-            alloc_recv_ms = (_time.time() - t0) * 1000
-
-            t0 = _time.time()
-            pg.broadcast(buf_tensor, self.rank)
-            nccl_broadcast_ms = (_time.time() - t0) * 1000
-
-            t0 = _time.time()
-            _torch.cuda.current_stream().synchronize()
-            pre_split_sync_ms = (_time.time() - t0) * 1000
-
-            t0 = _time.time()
-            self._recv_gbuf = recv_gbuf
-            self.tensors = self.metadata.get_tensors(
-                recv_gbuf, self.device, self.metadata.header_length
-            )
-            split_tensors_ms = (_time.time() - t0) * 1000
-
-        t0 = _time.time()
-        _torch.cuda.current_stream().synchronize()
-        cuda_sync_ms = (_time.time() - t0) * 1000
-
-        if is_owner:
-            logger.error(
-                "broadcast_file_buffer timing: owner rank=%d, buffer_size=%d, "
-                "dlpack_wrap=%.3fms, nccl_broadcast=%.3fms, cuda_sync=%.3fms, src=%s",
-                self.rank,
-                buffer_size,
-                dlpack_wrap_ms,
-                nccl_broadcast_ms,
-                cuda_sync_ms,
-                self.metadata.src,
-            )
-        else:
-            logger.error(
-                "broadcast_file_buffer timing: recv rank=%d, buffer_size=%d, "
-                "alloc_recv=%.3fms, nccl_broadcast=%.3fms, pre_split_sync=%.3fms, "
-                "split_tensors=%.3fms, cuda_sync=%.3fms, src=%s",
-                pg.rank(),
-                buffer_size,
-                alloc_recv_ms,
-                nccl_broadcast_ms,
-                pre_split_sync_ms,
-                split_tensors_ms,
-                cuda_sync_ms,
-                self.metadata.src,
-            )
-
-        self._file_buffer_broadcasted = True
-
     def shuffle(self, pg: ProcessGroupBase, tensor_name: str, dim: int) -> TensorBase:
         if pg.size() == 1:
             return self.tensors[tensor_name]
@@ -243,38 +124,21 @@ class LazyTensorFactory:
             return t
         frame = self.metadata.tensors[tensor_name]
         if dim == -1:
-            # If file-level broadcast has been done, tensors are already available locally
-            if self._file_buffer_broadcasted and tensor_name in self.tensors:
-                logger.debug(
-                    "shuffle: use file_buffer_broadcasted tensor, tensor_name=%s, self.rank=%d",
-                    tensor_name,
-                    self.rank,
-                )
-                dst = self.tensors[tensor_name]
-            elif tensor_name in self.tensors:
+            if tensor_name in self.tensors:
                 dst = self.tensors[tensor_name].clone().detach()
-                logger.debug(
-                    "shuffle: broadcast, tensor_name=%s, shape=%s, self.rank=%d, pg.rank()=%d, has_tensor=%s",
-                    tensor_name,
-                    frame.shape,
-                    self.rank,
-                    pg.rank(),
-                    True,
-                )
-                pg.broadcast(dst, self.rank)
             else:
                 dst = self.framework.get_empty_tensor(
                     frame.shape, frame.dtype, self.device
                 )
-                logger.debug(
-                    "shuffle: broadcast, tensor_name=%s, shape=%s, self.rank=%d, pg.rank()=%d, has_tensor=%s",
-                    tensor_name,
-                    frame.shape,
-                    self.rank,
-                    pg.rank(),
-                    False,
-                )
-                pg.broadcast(dst, self.rank)
+            logger.debug(
+                "shuffle: broadcast, tensor_name=%s, shape=%s, self.rank=%d, pg.rank()=%d, has_tensor=%s",
+                tensor_name,
+                frame.shape,
+                self.rank,
+                pg.rank(),
+                tensor_name in self.tensors,
+            )
+            pg.broadcast(dst, self.rank)
         else:
             rank_slices: List[Tuple] = [() for i in range(0, pg.size())]
             size = frame.shape[dim]
@@ -386,11 +250,3 @@ class LazyTensorFactory:
                 "free_dev_ptrs: delete buf, addr=0x%x", self.gbuf.get_base_address()
             )
             self.gbuf = None
-        if self._recv_gbuf is not None:
-            self.framework.free_tensor_memory(self._recv_gbuf, self.device)
-            logger.debug(
-                "free_dev_ptrs: delete recv_buf, addr=0x%x",
-                self._recv_gbuf.get_base_address(),
-            )
-            self._recv_gbuf = None
-        self._file_buffer_broadcasted = False

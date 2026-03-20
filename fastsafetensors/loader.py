@@ -46,7 +46,6 @@ class BaseSafeTensorsFileLoader:
         set_numa: bool = True,
         disable_cache: bool = True,
         framework="pytorch",
-        metadata_cache: Optional[Dict[str, SafeTensorsMetadata]] = None,
         **kwargs,
     ):
         self.framework = get_framework_op(framework)
@@ -61,7 +60,6 @@ class BaseSafeTensorsFileLoader:
             device=device,
             **kwargs,
         )
-        self._metadata_cache: Dict[str, SafeTensorsMetadata] = metadata_cache or {}
 
     def init_numa(self, set_numa: bool = True):
         global gl_set_numa
@@ -98,12 +96,7 @@ class BaseSafeTensorsFileLoader:
                 next_idx = rank_next_idx[rank]
                 if next_idx < len(filenames[rank]):
                     realpath = filenames[rank][next_idx]  # os.path.realpath(filename)
-                    if realpath in self._metadata_cache:
-                        metadata = self._metadata_cache[realpath]
-                    else:
-                        metadata = SafeTensorsMetadata.from_file(
-                            realpath, self.framework
-                        )
+                    metadata = SafeTensorsMetadata.from_file(realpath, self.framework)
                     self.meta[realpath] = (metadata, rank)
                     self.frames.update(metadata.tensors)
                     if rank == self.pg.rank():

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import time
 from typing import Any, List, Optional
 
-from fastsafetensor_3fs_reader import ThreeFSFileReader, extract_mount_point
+from fastsafetensor_3fs_reader import extract_mount_point
 
 from . import cpp as fstcpp
-from .common import SafeTensorsMetadata, init_logger
+from .common import init_logger
 from .frameworks import get_framework_op
 from .loader import BaseSafeTensorsFileLoader, loaded_library
 from .parallel_loader import PipelineParallel
@@ -43,7 +42,6 @@ class ThreeFSLoader(BaseSafeTensorsFileLoader):
         debug_log: bool = False,
         disable_cache: bool = True,
         framework: str = "pytorch",
-        metadata_cache: Optional[dict] = None,
         **kwargs,
     ):
         self.framework = get_framework_op(framework)
@@ -62,7 +60,6 @@ class ThreeFSLoader(BaseSafeTensorsFileLoader):
             set_numa=True,
             disable_cache=disable_cache,
             framework=framework,
-            metadata_cache=metadata_cache,
             mount_point=mount_point,
             **kwargs,
         )
@@ -111,23 +108,10 @@ class ParallelThreeFSLoader(PipelineParallel):
         device: str = "cpu",
         debug_log: bool = False,
         framework: str = "pytorch",
-        pre_open_files: bool = True,
-        lazy_broadcast: bool = True,
         **kwargs,
     ):
-        t_total_start = time.time()
-
-        # Timing accumulators (ms), default 0 for steps skipped when pre_open_files=False
-        t_read_headers = 0.0
-        t_parse_headers = 0.0
-        t_inject_cache = 0.0
-
-        metadata_cache: dict = {}
-        self._reader: Optional[ThreeFSFileReader] = None
         mount_point: str = extract_mount_point(hf_weights_files[0])
 
-        # Step 1: Create ThreeFSLoader
-        t0 = time.time()
         loader = ThreeFSLoader(
             pg,
             device=device,
@@ -135,50 +119,9 @@ class ParallelThreeFSLoader(PipelineParallel):
             disable_cache=True,
             debug_log=debug_log,
             framework=framework,
-            metadata_cache=metadata_cache,
             **kwargs,
         )
-        t_create_loader = (time.time() - t0) * 1000
 
-        # Step 2: Get reader reference
-        t0 = time.time()
-        self._reader = getattr(loader.copier_constructor, "reader", None)
-        t_get_reader = (time.time() - t0) * 1000
-
-        if pre_open_files and self._reader is not None:
-            framework_op = get_framework_op(framework)
-
-            # Step 3: Batch open + read headers (C++ thread pool)
-            t0 = time.time()
-            header_results = self._reader.read_headers_batch(hf_weights_files)
-            t_read_headers = (time.time() - t0) * 1000
-
-            # Step 4: Parse headers → SafeTensorsMetadata
-            t0 = time.time()
-            for filepath, (
-                header_string,
-                header_length,
-                file_size,
-            ) in header_results.items():
-                try:
-                    metadata_cache[filepath] = SafeTensorsMetadata.from_header_bytes(
-                        header_string, header_length, file_size, filepath, framework_op
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "from_header_bytes failed for %s: %s, will load on demand",
-                        filepath,
-                        exc,
-                    )
-            t_parse_headers = (time.time() - t0) * 1000
-
-            # Step 5: Inject metadata_cache into loader
-            t0 = time.time()
-            loader._metadata_cache.update(metadata_cache)
-            t_inject_cache = (time.time() - t0) * 1000
-
-        # Step 6: PipelineParallel.__init__
-        t0 = time.time()
         super().__init__(
             pg,
             loader,
@@ -186,32 +129,8 @@ class ParallelThreeFSLoader(PipelineParallel):
             max_concurrent_producers,
             queue_size,
             use_tqdm_on_load,
-            lazy_broadcast=lazy_broadcast,
             **kwargs,
         )
-        t_pipeline_init = (time.time() - t0) * 1000
-
-        t_total = (time.time() - t_total_start) * 1000
-        logger.info(
-            "ParallelThreeFSLoader.__init__: total=%.3fms | "
-            "create_loader=%.3fms, get_reader=%.3fms, "
-            "read_headers=%.3fms, parse_headers=%.3fms, "
-            "inject_cache=%.3fms, pipeline_init=%.3fms, "
-            "files=%d",
-            t_total,
-            t_create_loader,
-            t_get_reader,
-            t_read_headers,
-            t_parse_headers,
-            t_inject_cache,
-            t_pipeline_init,
-            len(metadata_cache),
-        )
-
-    def close(self):
-        if self._reader is not None:
-            self._reader.close()
-        super().close()
 
 
 __all__ = [

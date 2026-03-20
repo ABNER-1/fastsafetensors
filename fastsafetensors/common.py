@@ -173,31 +173,6 @@ class SafeTensorsMetadata:
         )
 
     @classmethod
-    def from_header_bytes(
-        self,
-        header_string: str,
-        header_length: int,
-        file_size: int,
-        filename: str,
-        framework: FrameworkOpBase,
-    ):
-        """
-        从已读取好的 header 字符串直接构造 SafeTensorsMetadata。
-
-        用于配合 ThreeFSFileReader.read_headers_batch，跳过 os.open/read/close。
-
-        Args:
-            header_string: header JSON 字符串（不含前 8 字节长度前缀）
-            header_length: header 总长度（n + 8）
-            file_size: 文件总大小
-            filename: 文件路径（用于错误信息和 src 字段）
-            framework: 框架操作对象
-        """
-        return SafeTensorsMetadata(
-            header_string, header_length, file_size, framework, filename
-        )
-
-    @classmethod
     def from_file(self, filename: str, framework: FrameworkOpBase):
         fd = os.open(filename, os.O_RDONLY, 0o644)
         ret = self.from_fd(fd, filename, framework=framework, keep_orig_dict=False)

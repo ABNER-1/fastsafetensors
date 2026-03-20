@@ -122,7 +122,6 @@ class PipelineParallel:
         queue_size: int = 0,  # Changed default to 0 for unbuffered behavior
         use_tqdm_on_load: bool = True,
         use_cuda_streams: bool = True,  # Enable CUDA streams by default
-        lazy_broadcast: bool = True,  # True: per-file on-demand broadcast; False: broadcast all files upfront
         **kwargs,
     ):
 
@@ -132,7 +131,6 @@ class PipelineParallel:
         self.queue_size = queue_size
         self.use_tqdm_on_load = use_tqdm_on_load
         self.use_cuda_streams = use_cuda_streams
-        self.lazy_broadcast = lazy_broadcast
 
         # Batch files
         self.weight_files_batches = self._create_batches(pg)
@@ -334,31 +332,12 @@ class PipelineParallel:
             self._log_message(
                 f"Batch {batch.batch_id}: tensor key len: {len(batch.keys)}"
             )
-            grouped_keys = batch.fb.get_keys_grouped_by_file()
-            broadcast_time = 0.0
-            fb_get_tensor_time = 0.0
-            yield_wait_time = 0.0
             with TimingContext(
                 "get_tensor", self._log_message, batch.batch_id
             ) as timer:
-                yield_start = time.time()
-                for key in grouped_keys:
-                    yield_wait_time += (time.time() - yield_start) * 1000
-                    if self.lazy_broadcast:
-                        rank, lidx = batch.fb.key_to_rank_lidx[key]
-                        with TimingContext(
-                            "lazy_broadcast", None, batch.batch_id, log_on_exit=False
-                        ) as bt:
-                            batch.fb.ensure_file_broadcasted(rank, lidx)
-                        broadcast_time += bt.elapsed_ms
-                    with TimingContext(
-                        "fb_get_tensor", None, batch.batch_id, log_on_exit=False
-                    ) as gt:
-                        tensor = batch.fb.get_tensor(key)
-                    fb_get_tensor_time += gt.elapsed_ms
-                    yield_start = time.time()
+                for key in batch.keys:
+                    tensor = batch.fb.get_tensor(key)
                     yield key, tensor
-                yield_wait_time += (time.time() - yield_start) * 1000
             get_tensor_time = timer.elapsed_ms
         finally:
             # Close the file buffer
@@ -370,12 +349,9 @@ class PipelineParallel:
             f"Batch {batch.batch_id} summary: "
             f"add_filenames={batch.add_filenames_time:.3f}ms, "
             f"copy_files={batch.copy_files_time:.3f}ms, "
-            f"lazy_broadcast={broadcast_time:.3f}ms, "
-            f"fb_get_tensor={fb_get_tensor_time:.3f}ms, "
-            f"yield_wait={yield_wait_time:.3f}ms, "
             f"get_tensor_total={get_tensor_time:.3f}ms, "
             f"close={close_time:.3f}ms, "
-            f"num_keys={len(grouped_keys)}"
+            f"num_keys={len(batch.keys)}"
         )
         # sync
         if self.queue_size < 0 and self.consumer_processed is not None:
@@ -484,7 +460,6 @@ class ParallelLoader(PipelineParallel):
         debug_log: bool = False,
         framework="pytorch",
         use_cuda_streams: bool = True,  # Enable CUDA streams by default
-        lazy_broadcast: bool = True,  # True: per-file on-demand broadcast; False: broadcast all upfront
         **kwargs,
     ):
         """Initialize PipelineParallelLoader with a pre-configured SafeTensorsFileLoader.
@@ -502,8 +477,6 @@ class ParallelLoader(PipelineParallel):
             set_numa (bool): If True, set NUMA node for optimal memory allocation.
             debug_log (bool): Enable debug logs.
             framework (str): Framework to use for tensor operations.
-            lazy_broadcast (bool): If True, broadcast file buffers on demand per-file.
-                                   If False, broadcast all file buffers upfront.
         """
         loader = SafeTensorsFileLoader(
             pg,
@@ -525,6 +498,5 @@ class ParallelLoader(PipelineParallel):
             queue_size,
             use_tqdm_on_load,
             use_cuda_streams=use_cuda_streams,
-            lazy_broadcast=lazy_broadcast,
             **kwargs,
         )

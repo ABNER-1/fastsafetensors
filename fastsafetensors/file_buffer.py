@@ -54,60 +54,6 @@ class FilesBufferOnDevice:
         self.pg = pg
         self.auto_mem_delete = auto_mem_delete and self.pg.size() > 1
 
-    def broadcast_all_files(self) -> None:
-        """Broadcast all file buffers at once using file-level broadcast.
-
-        Instead of broadcasting each tensor individually (which requires N separate
-        memory allocations and N broadcast calls), this method broadcasts each file's
-        entire data buffer in a single operation, then uses dlpack to zero-copy split
-        individual tensors from the received buffer.
-
-        This must be called by all ranks in the process group in the same order (SPMD).
-        After calling this method, subsequent get_tensor() calls will find tensors
-        already available locally and skip per-tensor broadcast.
-        """
-        if self.pg.size() <= 1:
-            return
-
-        for rank, loaders in sorted(self.rank_loaders.items()):
-            for loader in loaders:
-                loader.broadcast_file_buffer(self.pg)
-
-    def ensure_file_broadcasted(self, rank: int, lidx: int) -> None:
-        """Broadcast a single file buffer on demand.
-
-        This is the lazy counterpart of broadcast_all_files(). It broadcasts
-        only the file identified by (rank, lidx) if it has not been broadcast
-        yet. The underlying broadcast_file_buffer() is idempotent, so calling
-        this multiple times for the same file is safe.
-
-        All ranks must call this for the same (rank, lidx) in the same order
-        to satisfy SPMD constraints of collective communication.
-        """
-        if self.pg.size() <= 1:
-            return
-        self.rank_loaders[rank][lidx].broadcast_file_buffer(self.pg)
-
-    def get_keys_grouped_by_file(self) -> List[str]:
-        """Return tensor keys grouped by their source file.
-
-        Keys belonging to the same file (rank, lidx) are placed consecutively.
-        Files are ordered by (rank, lidx) ascending, matching the iteration
-        order used by broadcast_all_files() to guarantee SPMD safety.
-
-        This ordering ensures that when combined with ensure_file_broadcasted(),
-        each file's buffer can be broadcast just before its tensors are consumed
-        and freed immediately after, keeping peak GPU memory overhead to a
-        single file buffer at a time.
-        """
-        groups: Dict[Tuple[int, int], List[str]] = {}
-        for key, (rank, lidx) in self.key_to_rank_lidx.items():
-            groups.setdefault((rank, lidx), []).append(key)
-        ordered_keys: List[str] = []
-        for file_id in sorted(groups.keys()):
-            ordered_keys.extend(groups[file_id])
-        return ordered_keys
-
     def close(self):
         for _, loaders in self.rank_loaders.items():
             for loader in loaders:
