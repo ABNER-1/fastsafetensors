@@ -121,7 +121,6 @@ class PipelineParallel:
         max_concurrent_producers: int = 1,
         queue_size: int = 0,  # Changed default to 0 for unbuffered behavior
         use_tqdm_on_load: bool = True,
-        use_cuda_streams: bool = True,  # Enable CUDA streams by default
         **kwargs,
     ):
 
@@ -130,7 +129,6 @@ class PipelineParallel:
         self.max_concurrent_producers = max_concurrent_producers
         self.queue_size = queue_size
         self.use_tqdm_on_load = use_tqdm_on_load
-        self.use_cuda_streams = use_cuda_streams
 
         # Batch files
         self.weight_files_batches = self._create_batches(pg)
@@ -155,24 +153,6 @@ class PipelineParallel:
         # Logging setup - get from environment variable, default to False
         self.print_log = os.getenv("FASTSAFETENSORS_DEBUG", "false").lower() == "true"
         self.log_prefix = f"PG{pg.rank() if pg is not None else 0}"
-
-        # Create dedicated CUDA stream for producer (after print_log is set)
-        # Note: consumer runs on the main thread, yielded tensors naturally async with
-        # the caller's CUDA operations on the default stream, so no consumer_stream needed.
-        self.producer_stream = None
-        if self.use_cuda_streams:
-            try:
-                if torch.cuda.is_available():
-                    self.producer_stream = torch.cuda.Stream()
-                    if self.print_log:
-                        print(
-                            f"[{self.log_prefix}] CUDA Streams enabled: producer_stream={self.producer_stream}"
-                        )
-            except Exception as e:
-                if self.print_log:
-                    print(
-                        f"[{self.log_prefix}] Warning: Failed to create CUDA streams: {e}"
-                    )
         fstcpp.set_gil_release(True)
 
     def _create_batches(self, pg) -> List[List[str]]:
@@ -246,17 +226,10 @@ class PipelineParallel:
                 # Clear the event after wait to ensure next wait will block
                 self.consumer_processed.clear()
 
-            # Copy files to device with dedicated CUDA stream
             with TimingContext(
                 "copy_files_to_device", self._log_message, batch_id
             ) as timer:
-                if self.producer_stream is not None:
-                    with torch.cuda.stream(self.producer_stream):
-                        fb = self.loader.copy_files_to_device()
-                        # Synchronize to ensure copy is complete before putting in queue
-                        torch.cuda.current_stream().synchronize()
-                else:
-                    fb = self.loader.copy_files_to_device()
+                fb = self.loader.copy_files_to_device()
             copy_time = timer.elapsed_ms
 
             # Get tensor keys
@@ -459,7 +432,6 @@ class ParallelLoader(PipelineParallel):
         set_numa: bool = True,
         debug_log: bool = False,
         framework="pytorch",
-        use_cuda_streams: bool = True,  # Enable CUDA streams by default
         **kwargs,
     ):
         """Initialize PipelineParallelLoader with a pre-configured SafeTensorsFileLoader.
@@ -497,6 +469,5 @@ class ParallelLoader(PipelineParallel):
             max_concurrent_producers,
             queue_size,
             use_tqdm_on_load,
-            use_cuda_streams=use_cuda_streams,
             **kwargs,
         )
