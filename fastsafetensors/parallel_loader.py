@@ -153,6 +153,18 @@ class PipelineParallel:
         # Logging setup - get from environment variable, default to False
         self.print_log = os.getenv("FASTSAFETENSORS_DEBUG", "false").lower() == "true"
         self.log_prefix = f"PG{pg.rank() if pg is not None else 0}"
+
+        # Create a dedicated CUDA stream for the producer thread.
+        # The producer submits copy_files_to_device() on this stream without blocking.
+        # The consumer synchronizes this stream before calling get_tensor(), allowing
+        # producer I/O and consumer tensor extraction to overlap across batches.
+        self.producer_stream = None
+        try:
+            if torch.cuda.is_available():
+                self.producer_stream = torch.cuda.Stream()
+        except Exception:
+            pass
+
         fstcpp.set_gil_release(True)
 
     def _create_batches(self, pg) -> List[List[str]]:
@@ -229,7 +241,12 @@ class PipelineParallel:
             with TimingContext(
                 "copy_files_to_device", self._log_message, batch_id
             ) as timer:
-                fb = self.loader.copy_files_to_device()
+                if self.producer_stream is not None:
+                    with torch.cuda.stream(self.producer_stream):
+                        fb = self.loader.copy_files_to_device()
+                        self.producer_stream.synchronize()
+                else:
+                    fb = self.loader.copy_files_to_device()
             copy_time = timer.elapsed_ms
 
             # Get tensor keys
