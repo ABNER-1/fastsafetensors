@@ -121,6 +121,7 @@ class PipelineParallel:
         max_concurrent_producers: int = 1,
         queue_size: int = 0,  # Changed default to 0 for unbuffered behavior
         use_tqdm_on_load: bool = True,
+        use_cuda_streams: bool = True,
         **kwargs,
     ):
 
@@ -155,15 +156,15 @@ class PipelineParallel:
         self.log_prefix = f"PG{pg.rank() if pg is not None else 0}"
 
         # Create a dedicated CUDA stream for the producer thread.
-        # The producer submits copy_files_to_device() on this stream without blocking.
-        # The consumer synchronizes this stream before calling get_tensor(), allowing
-        # producer I/O and consumer tensor extraction to overlap across batches.
+        # The producer submits copy_files_to_device() on this stream and synchronizes
+        # immediately, isolating GPU operations from the consumer's default stream.
         self.producer_stream = None
-        try:
-            if torch.cuda.is_available():
-                self.producer_stream = torch.cuda.Stream()
-        except Exception:
-            pass
+        if use_cuda_streams:
+            try:
+                if torch.cuda.is_available():
+                    self.producer_stream = torch.cuda.Stream()
+            except Exception:
+                pass
 
         fstcpp.set_gil_release(True)
 
@@ -442,6 +443,7 @@ class ParallelLoader(PipelineParallel):
         max_concurrent_producers: int = 1,
         queue_size: int = 0,  # Changed default to 0 for unbuffered behavior
         use_tqdm_on_load: bool = True,
+        use_cuda_streams: bool = True,
         device: str = "cpu",
         bbuf_size_kb: int = 16 * 1024,
         max_threads: int = 16,
@@ -486,5 +488,6 @@ class ParallelLoader(PipelineParallel):
             max_concurrent_producers,
             queue_size,
             use_tqdm_on_load,
+            use_cuda_streams=use_cuda_streams,
             **kwargs,
         )
