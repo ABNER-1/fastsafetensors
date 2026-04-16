@@ -44,6 +44,17 @@ unittest-paddle-gpu:
 	@FST_DIR=$(FST_DIR); \
 	TEST_FASTSAFETENSORS_FRAMEWORK=paddle COVERAGE_FILE=.coverage_11 pytest -s --cov=$(FST_DIR) tests/test_fastsafetensors.py
 
+.PHONY: test test-mock test-3fs test-distributed test-all
+test: test-mock
+test-mock:
+	bash scripts/run_tests.sh --mock
+test-3fs:
+	bash scripts/run_tests.sh --3fs
+test-distributed:
+	bash scripts/run_tests.sh --distributed
+test-all:
+	bash scripts/run_tests.sh --all --coverage
+
 htmlcov:
 	coverage combine .coverage_* && \
 	coverage html
